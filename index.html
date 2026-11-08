@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ピアノ接続チェック</title>
+<style>
+:root{
+  --bg:#f3f5f7; --surface:#ffffff; --ink:#1d2430; --muted:#5d6878;
+  --line:#d5dbe3; --ok:#1f7a4d; --okbg:#e2f3ea; --ng:#b3261e; --ngbg:#fbe6e4;
+  --wait:#8a6200; --waitbg:#fbf1d6; --key:#2b5fb4; --black:#1d2430; --white:#ffffff;
+  color-scheme:light;
+  box-sizing:border-box;
+  padding-top:env(safe-area-inset-top,0px);
+  padding-bottom:env(safe-area-inset-bottom,0px);
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#14181e; --surface:#1d232b; --ink:#e7ebf0; --muted:#9aa5b3;
+    --line:#333c48; --ok:#6fd39e; --okbg:#173326; --ng:#ff8f86; --ngbg:#3a1d1b;
+    --wait:#f0c45a; --waitbg:#3a2f12; --key:#7aa7ff; --black:#0b0e12; --white:#e9edf2;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#14181e; --surface:#1d232b; --ink:#e7ebf0; --muted:#9aa5b3;
+  --line:#333c48; --ok:#6fd39e; --okbg:#173326; --ng:#ff8f86; --ngbg:#3a1d1b;
+  --wait:#f0c45a; --waitbg:#3a2f12; --key:#7aa7ff; --black:#0b0e12; --white:#e9edf2;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font-family:"Hiragino Sans","Noto Sans JP","Yu Gothic",system-ui,sans-serif;line-height:1.6}
+main{max-width:640px;margin:0 auto;padding:20px 16px 40px}
+h1{font-size:1.35rem;margin:0 0 4px}
+.lead{color:var(--muted);margin:0 0 18px;font-size:.95rem}
+.status{border-radius:12px;padding:14px 16px;margin-bottom:14px;font-weight:600}
+.status small{display:block;font-weight:400;margin-top:4px}
+.s-wait{background:var(--waitbg);color:var(--wait)}
+.s-ok{background:var(--okbg);color:var(--ok)}
+.s-ng{background:var(--ngbg);color:var(--ng)}
+section{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:14px}
+h2{font-size:1rem;margin:0 0 8px}
+ul.dev{margin:0;padding-left:1.2em}
+.now{font-size:2.6rem;font-weight:700;text-align:center;min-height:3.4rem;letter-spacing:.02em}
+.nowsub{text-align:center;color:var(--muted);min-height:1.6em}
+.kb-wrap{overflow-x:auto;margin-top:10px}
+svg.kb{display:block;height:90px}
+.log{font-family:ui-monospace,Menlo,monospace;font-size:.82rem;max-height:180px;overflow:auto;margin:0;white-space:pre-wrap;color:var(--muted)}
+button{font:inherit;font-size:1rem;padding:10px 16px;border-radius:10px;border:1px solid var(--line);background:var(--surface);color:var(--ink)}
+button:focus-visible{outline:3px solid var(--key);outline-offset:2px}
+.check dt{font-weight:600}
+.check dd{margin:0 0 6px;color:var(--muted)}
+</style>
+</head>
+<body>
+<main>
+  <h1>ピアノ接続チェック</h1>
+  <p class="lead">ピアノとケーブルでつないだ状態で、鍵盤をいくつか押してください。</p>
+
+  <div id="status" class="status s-wait">確認中…</div>
+
+  <section>
+    <h2>見つかった機器</h2>
+    <ul class="dev" id="devices"><li>まだありません</li></ul>
+  </section>
+
+  <section>
+    <h2>いま押している音</h2>
+    <div class="now" id="now">—</div>
+    <div class="nowsub" id="nowsub">鍵盤を押すとここに表示されます</div>
+    <div class="kb-wrap"><svg class="kb" id="kb" aria-label="鍵盤表示"></svg></div>
+  </section>
+
+  <section>
+    <h2>受信ログ</h2>
+    <pre class="log" id="log">（まだ受信していません）</pre>
+  </section>
+
+  <section>
+    <h2>表示されないとき</h2>
+    <dl class="check">
+      <dt>ケーブル</dt><dd>スマホ側はUSB-C（またはOTG変換）、ピアノ側はUSB TO HOST端子に挿します。充電専用ケーブルだと通信できません。</dd>
+      <dt>USBの設定</dt><dd>Androidで接続時の通知が出たら「MIDI」や「ファイル転送」を選んでみてください。</dd>
+      <dt>ブラウザ</dt><dd>AndroidのChromeで開いてください。iPhoneのSafariはブラウザからMIDIを読めません。</dd>
+      <dt>つなぎ直し</dt><dd>ケーブルを挿し直したあと、下のボタンで再確認します。</dd>
+    </dl>
+    <button id="retry">もう一度確認する</button>
+  </section>
+</main>
+<script>
+(function(){
+  const NAMES_JA=["ド","ド♯","レ","レ♯","ミ","ファ","ファ♯","ソ","ソ♯","ラ","ラ♯","シ"];
+  const NAMES_EN=["C","C♯","D","D♯","E","F","F♯","G","G♯","A","A♯","B"];
+  const $=id=>document.getElementById(id);
+  const held=new Map();
+  let logLines=[];
+  let access=null;
+
+  function setStatus(kind,text,sub){
+    const el=$("status");
+    el.className="status s-"+kind;
+    el.textContent=text;
+    if(sub){const s=document.createElement("small");s.textContent=sub;el.appendChild(s);}
+  }
+  function nameOf(n){return NAMES_JA[n%12]+"（"+NAMES_EN[n%12]+(Math.floor(n/12)-1)+"）";}
+
+  function log(t){
+    const d=new Date();
+    const ts=d.toTimeString().slice(0,8);
+    logLines.unshift(ts+"  "+t);
+    if(logLines.length>40)logLines.length=40;
+    $("log").textContent=logLines.join("\n");
+  }
+
+  // keyboard 21..108
+  const LOW=21,HIGH=108,WW=14,WH=90,BW=9,BH=56;
+  const isBlack=n=>[1,3,6,8,10].includes(n%12);
+  function drawKb(){
+    const svg=$("kb");
+    let whites=[];for(let n=LOW;n<=HIGH;n++)if(!isBlack(n))whites.push(n);
+    const W=whites.length*WW;
+    svg.setAttribute("viewBox","0 0 "+W+" "+WH);
+    svg.setAttribute("width",W);
+    let s="";
+    const xOf={};
+    whites.forEach((n,i)=>{xOf[n]=i*WW;
+      s+='<rect data-n="'+n+'" x="'+(i*WW)+'" y="0" width="'+WW+'" height="'+WH+'" fill="var(--white)" stroke="var(--line)"/>';
+      if(n%12===0)s+='<text x="'+(i*WW+WW/2)+'" y="'+(WH-6)+'" font-size="8" text-anchor="middle" fill="var(--muted)">C'+(Math.floor(n/12)-1)+'</text>';
+    });
+    for(let n=LOW;n<=HIGH;n++)if(isBlack(n)){
+      const x=xOf[n-1]+WW-BW/2;
+      s+='<rect data-n="'+n+'" x="'+x+'" y="0" width="'+BW+'" height="'+BH+'" fill="var(--black)"/>';
+    }
+    svg.innerHTML=s;
+  }
+  function paint(){
+    document.querySelectorAll("#kb rect").forEach(r=>{
+      const n=+r.dataset.n;
+      if(held.has(n))r.setAttribute("fill","var(--key)");
+      else r.setAttribute("fill",isBlack(n)?"var(--black)":"var(--white)");
+    });
+    const notes=[...held.keys()].sort((a,b)=>a-b);
+    if(notes.length===0){$("now").textContent="—";return;}
+    $("now").textContent=notes.map(n=>NAMES_JA[n%12]).join(" ");
+    $("nowsub").textContent=notes.map(nameOf).join("・")+(notes.length>1?"　"+notes.length+"音同時":"");
+  }
+
+  function onMsg(e,name){
+    const [st,d1,d2]=e.data;
+    const cmd=st&0xf0;
+    if(cmd===0x90&&d2>0){
+      held.set(d1,d2);paint();
+      log("押した "+nameOf(d1)+"  強さ "+d2);
+      setStatus("ok","接続OK：ピアノの音を受信できています","機器："+name);
+    }else if(cmd===0x80||(cmd===0x90&&d2===0)){
+      held.delete(d1);paint();
+    }else if(cmd===0xB0&&d1===64){
+      log("ペダル "+(d2>=64?"踏んだ":"離した"));
+    }
+  }
+
+  function refreshDevices(){
+    const ul=$("devices");ul.innerHTML="";
+    let count=0;
+    access.inputs.forEach(inp=>{
+      count++;
+      const li=document.createElement("li");
+      li.textContent=(inp.name||"名前なし")+(inp.manufacturer?"（"+inp.manufacturer+"）":"")+"　状態："+(inp.state==="connected"?"接続中":inp.state);
+      ul.appendChild(li);
+      inp.onmidimessage=e=>onMsg(e,inp.name||"MIDI機器");
+    });
+    if(count===0){
+      const li=document.createElement("li");li.textContent="MIDI機器が見つかりません";ul.appendChild(li);
+      setStatus("ng","ピアノが見つかりません","MIDIは使える状態ですが、機器が認識されていません。下の「表示されないとき」を確認してください。");
+    }else if(!$("status").classList.contains("s-ok")){
+      setStatus("wait","機器を認識しました。鍵盤を押してください",count+"台の入力機器が見つかりました");
+    }
+    return count;
+  }
+
+  async function start(){
+    setStatus("wait","確認中…");
+    if(!("requestMIDIAccess" in navigator)){
+      setStatus("ng","このブラウザではMIDIが使えません","AndroidのChromeで開いてください（iPhoneのSafariは非対応）。");
+      log("navigator.requestMIDIAccess がありません");
+      return;
+    }
+    try{
+      access=await navigator.requestMIDIAccess({sysex:false});
+      log("MIDIの利用が許可されました");
+      refreshDevices();
+      access.onstatechange=e=>{
+        log((e.port.name||"機器")+"："+(e.port.state==="connected"?"接続":"切断"));
+        refreshDevices();
+      };
+    }catch(err){
+      const n=err&&err.name?err.name:"Error";
+      log("エラー "+n+"："+(err&&err.message?err.message:""));
+      if(n==="SecurityError"||n==="NotAllowedError"){
+        setStatus("ng","このページ上ではMIDIの利用が許可されていません","ブラウザの許可を拒否したか、claude.ai上のページではMIDIが制限されています。後者の場合は別の場所にアプリを置く必要があります。");
+      }else{
+        setStatus("ng","MIDIを開始できませんでした",n);
+      }
+    }
+  }
+
+  drawKb();
+  $("retry").addEventListener("click",()=>{held.clear();paint();start();});
+  start();
+})();
+</script>
+</body>
+</html>
