@@ -1,0 +1,31 @@
+# ==== 著作権のある楽譜・変換データ（Publicリポジトリなので絶対にコミットしない） ====
+元の楽譜/
+scores/
+output/
+*.musicxml
+*.mxl
+*.xml
+*.mscz
+*.omr
+*_data.json
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.heic
+*.tif
+*.tiff
+
+# テスト用に自作した楽譜だけは例外として許可する（中身は自作のもののみ）
+!tools/tests/fixtures/*.musicxml
+
+# ==== Python ====
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# ==== その他 ====
+.claude/settings.local.json
+Thumbs.db
+desktop.ini
