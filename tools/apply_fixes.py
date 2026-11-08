@@ -13,6 +13,7 @@
     - 休符: r/q のように書く
     - タイ: 末尾に ~ を付けると、次の音（同じ高さ）へタイでつながる
     - 音部記号: clef:treble / clef:bass（その小節の最初に書く）
+    - 拍子記号: time:4/4 など（拍子が変わる小節の最初に書く。OMRが読み落としたとき用）
 
 修正ファイルは楽譜の内容そのものなので、scores/ に置いてコミットしない。
 """
@@ -22,7 +23,7 @@ import re
 from fractions import Fraction
 from pathlib import Path
 
-from music21 import chord, clef, note, stream, tie
+from music21 import chord, clef, meter, note, stream, tie
 
 DURATIONS = {"w": Fraction(4), "h": Fraction(2), "q": Fraction(1), "8": Fraction(1, 2), "16": Fraction(1, 4)}
 TOKEN = re.compile(r"^(?P<pitches>[^/]+)/(?P<trip>t?)(?P<base>w|h|q|8|16)(?P<dot>d?)(?P<tie>~?)$")
@@ -66,6 +67,9 @@ def build_measure(number: int, tokens: list[str]) -> stream.Measure:
     measure = stream.Measure(number=number)
     previous_tied: set[str] = set()
     for text in tokens:
+        if text.startswith("time:"):
+            measure.insert(0, meter.TimeSignature(text.split(":", 1)[1]))
+            continue
         if text.startswith("clef:"):
             kind = text.split(":", 1)[1]
             measure.append(clef.TrebleClef() if kind == "treble" else clef.BassClef())
@@ -107,9 +111,10 @@ def apply_fixes(score: stream.Score, fixes: dict[tuple[int, str], list[str]]) ->
         if old is None:
             raise ValueError(f"{number}小節が見つかりません")
         new = build_measure(number, tokens)
-        # 拍子記号はもとの小節から引き継ぐ（あれば）
-        for ts in old.getElementsByClass("TimeSignature"):
-            new.insert(0, copy.deepcopy(ts))
+        # 拍子記号は、修正ファイルに書いていなければもとの小節から引き継ぐ
+        if not new.getElementsByClass("TimeSignature"):
+            for ts in old.getElementsByClass("TimeSignature"):
+                new.insert(0, copy.deepcopy(ts))
         part.replace(old, new)
         done.add(number)
     return sorted(done)

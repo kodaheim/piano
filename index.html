@@ -147,6 +147,14 @@ textarea{width:100%;min-height:8em;font:inherit;font-size:.85rem;border-radius:1
       <button id="stopBtn" disabled>止める</button>
       <button id="skipBtn" disabled>ここを飛ばす</button>
     </div>
+    <div class="row">
+      <button id="playBtn">▶ お手本を聴く</button>
+      <label>テンポ <select id="tempo">
+        <option value="40">♩=40</option><option value="60">♩=60</option>
+        <option value="75">♩=75</option><option value="90">♩=90</option>
+      </select></label>
+      <label>音 <select id="playOut"><option value="audio">この端末</option></select></label>
+    </div>
     <p class="muted small" id="stageDesc"></p>
   </section>
   <section>
@@ -254,7 +262,7 @@ function esc(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",
 /* ---------- 保存 ---------- */
 function emptyDb(){
   return {song:null,stats:{},voice:{},timing:{},log:[],
-          ui:{stage:1,from:1,to:4,loop:false,split:60,inM:1}};
+          ui:{stage:1,from:1,to:4,loop:false,split:60,inM:1,tempo:60,playOut:"audio"}};
 }
 function loadDb(){
   let d=null;
@@ -338,6 +346,7 @@ function route(){
   document.querySelectorAll(".view").forEach(el=>el.classList.toggle("on",el.id==="v-"+v));
   document.querySelectorAll("nav a").forEach(a=>a.classList.toggle("on",a.dataset.v===v));
   if(v!=="practice"&&P.running)stopPractice("画面を切り替えたので止めました");
+  if(v!=="practice"&&PB.active)stopPlayback();
   if(v!=="input"&&I.recording)cancelRecording();
   if(v==="song")renderSong();
   if(v==="input")renderInput();
@@ -421,6 +430,7 @@ function bindInputs(){
   });
   if(names.length)setConn("ok","ピアノ："+names[0]);
   else setConn("ng","ピアノ：未接続（画面の鍵盤で操作できます）");
+  refreshOutputs();
 }
 function onMidi(e){
   const [st,d1,d2]=e.data;
@@ -519,6 +529,7 @@ const P={running:false,items:[],idx:0,stage:1,struck:new Map(),stepStart:0,misse
   for(const k in STAGES){const o=document.createElement("option");o.value=k;o.textContent=k+"："+STAGES[k].name;sel.appendChild(o);}
 })();
 function renderPracticeSetup(){
+  $("tempo").value=db.ui.tempo;refreshOutputs();
   $("stage").value=db.ui.stage;$("from").value=db.ui.from;$("to").value=db.ui.to;$("loop").checked=!!db.ui.loop;
   const max=db.song?db.song.measures:1;
   $("from").max=$("to").max=max;
@@ -547,6 +558,7 @@ function showIdle(){
   drawScore(db.ui.from,null);
 }
 function startPractice(){
+  stopPlayback();
   if(!db.song){showPMsg("ng","先に「曲」で曲データを読み込んでください");return;}
   P.stage=db.ui.stage;
   P.items=db.song.steps.filter(s=>s.m>=db.ui.from&&s.m<=db.ui.to)
@@ -860,6 +872,147 @@ window.addEventListener("resize",()=>{
   clearTimeout(resizeTimer);
   resizeTimer=setTimeout(()=>{if($("v-practice").classList.contains("on"))drawScore(lastScore.m,lastScore.step);},150);
 });
+
+/* ---------- お手本の再生 ----------
+   選んでいる段階で弾く音だけを、楽譜のリズムで鳴らす。
+   音はこの端末（Web Audio の簡単な合成音）か、MIDI出力（つないだ電子ピアノ）で出す。
+   先読みスケジューラ：50msごとに、少し先（200ms）までの音を予約する。 */
+const PB={active:false,timer:null,notes:[],marks:[],idx:0,midx:0,startMs:0,tickMs:0,endMs:0,
+          sounding:[],timeouts:[],out:null};
+let audioCtx=null;
+
+function refreshOutputs(){
+  const sel=$("playOut");
+  const keep=db.ui.playOut;
+  sel.innerHTML='<option value="audio">この端末</option>';
+  if(midiAccess)midiAccess.outputs.forEach(o=>{
+    if(o.state!=="connected")return;
+    const opt=document.createElement("option");opt.value=o.id;opt.textContent="ピアノ（"+(o.name||"MIDI")+"）";sel.appendChild(opt);
+  });
+  sel.value=[...sel.options].some(x=>x.value===keep)?keep:"audio";
+}
+$("tempo").addEventListener("change",()=>{db.ui.tempo=+$("tempo").value;save();});
+$("playOut").addEventListener("change",()=>{db.ui.playOut=$("playOut").value;save();});
+$("playBtn").addEventListener("click",()=>{
+  if(PB.active){stopPlayback();return;}
+  if(!db.song)return;
+  // 練習中は今の小節だけ、練習していないときは選んだ範囲
+  const m=P.running?P.items[P.idx].step.m:null;
+  startPlayback(m||db.ui.from,m||db.ui.to,P.running?P.stage:db.ui.stage);
+});
+
+// 段階で弾く音の演奏データ（時間は tick、4分音符=12）
+function buildPerformance(fromM,toM,stage){
+  const notes=[],marks=[];
+  let base=0;
+  for(let m=fromM;m<=toM;m++){
+    const view=measureView(m);
+    for(const h of ["r","l"]){
+      for(const ev of view[h].ev){
+        const target=ev.step?targetOf(ev.step,stage):[];
+        ev.n.forEach(midi=>{
+          const tied=(ev.tie||[]).includes(midi);
+          notes.push({t:base+ev.o,d:ev.d,midi,tied,on:tied||target.includes(midi),vel:h==="r"?84:66});
+        });
+        if(ev.step&&target.some(n=>!(ev.tie||[]).includes(n)))
+          marks.push({t:base+ev.o,m,step:ev.step,keys:target});
+      }
+    }
+    base+=view.len||4*TPQ;
+  }
+  notes.sort((a,b)=>a.t-b.t);
+  // タイの続きは鳴らし直さず、前の音を伸ばす
+  for(const n of notes){
+    if(!n.tied)continue;
+    const prev=notes.filter(x=>x.midi===n.midi&&!x.tied&&x.t<n.t).pop();
+    if(prev&&prev.on)prev.d=Math.max(prev.d,n.t+n.d-prev.t);
+    n.skip=true;
+  }
+  marks.sort((a,b)=>a.t-b.t);
+  return {notes:notes.filter(n=>n.on&&!n.skip),marks,total:base};
+}
+function startPlayback(fromM,toM,stage){
+  stopPlayback();
+  const perf=buildPerformance(fromM,toM,stage);
+  if(!perf.notes.length)return;
+  PB.out=db.ui.playOut==="audio"||!midiAccess?null:midiAccess.outputs.get(db.ui.playOut)||null;
+  if(!PB.out){
+    audioCtx=audioCtx||new (window.AudioContext||window.webkitAudioContext)();
+    audioCtx.resume();
+  }
+  Object.assign(PB,{active:true,notes:perf.notes,marks:perf.marks,idx:0,midx:0,sounding:[],timeouts:[],
+    tickMs:60000/(db.ui.tempo||60)/TPQ,startMs:performance.now()+150});
+  PB.endMs=PB.startMs+perf.total*PB.tickMs;
+  $("playBtn").textContent="■ 再生を止める";
+  PB.timer=setInterval(schedule,50);
+  schedule();
+}
+function schedule(){
+  const now=performance.now(), horizon=now+200;
+  while(PB.idx<PB.notes.length&&PB.startMs+PB.notes[PB.idx].t*PB.tickMs<horizon){
+    const n=PB.notes[PB.idx++];
+    const at=PB.startMs+n.t*PB.tickMs, dur=n.d*PB.tickMs*0.95;
+    playNote(n.midi,n.vel,at,dur);
+  }
+  while(PB.midx<PB.marks.length&&PB.startMs+PB.marks[PB.midx].t*PB.tickMs<horizon){
+    const mk=PB.marks[PB.midx++];
+    const delay=Math.max(0,PB.startMs+mk.t*PB.tickMs-now);
+    PB.timeouts.push(setTimeout(()=>showPlaying(mk),delay));
+  }
+  if(PB.idx>=PB.notes.length&&now>PB.endMs+300)stopPlayback();
+}
+function playNote(midi,vel,atMs,durMs){
+  if(PB.out){
+    PB.out.send([0x90,midi,vel],atMs);
+    PB.out.send([0x80,midi,0],atMs+durMs);
+    PB.sounding.push(midi);
+    return;
+  }
+  // 簡単なピアノ風の音：三角波＋倍音、すぐ立ち上がってゆっくり減衰
+  const ctx=audioCtx, when=ctx.currentTime+Math.max(0,(atMs-performance.now())/1000), len=durMs/1000;
+  const f=440*Math.pow(2,(midi-69)/12);
+  const g=ctx.createGain(), v=0.22*(vel/127);
+  g.gain.setValueAtTime(0,when);
+  g.gain.linearRampToValueAtTime(v,when+0.006);
+  g.gain.setTargetAtTime(v*0.35,when+0.006,0.35);
+  g.gain.setTargetAtTime(0,when+len,0.08);
+  g.connect(ctx.destination);
+  const oscs=[["triangle",f,1],["sine",f*2,0.25]].map(([type,freq,amp])=>{
+    const o=ctx.createOscillator(),og=ctx.createGain();
+    o.type=type;o.frequency.value=freq;og.gain.value=amp;
+    o.connect(og);og.connect(g);o.start(when);o.stop(when+len+0.6);
+    return o;
+  });
+  PB.sounding.push({g,oscs});
+}
+function showPlaying(mk){
+  if(!PB.active)return;
+  drawScore(mk.m,mk.step);
+  kbState.hint=new Set(mk.keys);paintKeyboards();
+  if(!P.running)$("pMeasure").textContent=mk.m+"小節";
+}
+function stopPlayback(){
+  if(!PB.active)return;
+  PB.active=false;
+  clearInterval(PB.timer);
+  PB.timeouts.forEach(clearTimeout);
+  if(PB.out){
+    const now=performance.now();
+    PB.sounding.forEach(m=>PB.out.send([0x80,m,0],now));
+    PB.out.send([0xB0,123,0],now);  // すべての音を止める
+  }else if(audioCtx){
+    const t=audioCtx.currentTime;
+    PB.sounding.forEach(({g,oscs})=>{
+      g.gain.cancelScheduledValues(t);g.gain.setTargetAtTime(0,t,0.03);
+      oscs.forEach(o=>{try{o.stop(t+0.2);}catch(e){}});
+    });
+  }
+  PB.sounding=[];
+  $("playBtn").textContent="▶ お手本を聴く";
+  kbState.hint.clear();paintKeyboards();
+  if(P.running){const it=P.items[P.idx];drawScore(it.step.m,it.step);}
+  else showIdle();
+}
 
 /* ---------- 入力（小節の入れ直し） ---------- */
 const I={recording:false,buffer:[],chord:new Set()};
